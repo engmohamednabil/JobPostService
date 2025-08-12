@@ -1,4 +1,6 @@
 using Npgsql;
+using RabbitMQ.Client;
+using System.Text;
 
 namespace JobPostService
 {
@@ -46,12 +48,13 @@ namespace JobPostService
             while (await reader.ReadAsync(stoppingToken))
             {
                 int id = reader.GetInt32(0);
-                string title = reader.GetString(1) ?? string.Empty; // Handle NULL values
-                string postDesc = title.Trim();
+                string title = reader.GetString(1) ?? string.Empty;
+                string postDesc = reader.GetString(2) ?? string.Empty;
 
-                if (title != postDesc)
+                if (!string.IsNullOrEmpty(postDesc))
                 {
-                    _logger.LogInformation("Trimming text for ID {id}: '{original}' -> '{trimmed}'", id, title, postDesc);
+                    _logger.LogInformation("Create job for item ID {id}: '{postDesc} ", id, postDesc);
+                    await passToMQAsync(postDesc);
                     /*
                     // Update the record
                     using var updateConnection = new NpgsqlConnection(_connectionString);
@@ -66,9 +69,37 @@ namespace JobPostService
                 }
                 else
                 {
-                    _logger.LogInformation("No trimming needed for ID {id}: '{text}'", id, title);
+                    _logger.LogInformation("No needed for job id {id}: '{title}'", id, title);
                 }
             }
+        }
+
+        private async Task passToMQAsync(string postDesc)
+        {
+            var factory = new ConnectionFactory
+            {
+                HostName = "localhost", // Hostname or IP of the Docker host
+                Port = 5672,           // Port mapped on the Docker host
+                UserName = "guest",    // Default RabbitMQ username
+                Password = "guest"     // Default RabbitMQ password
+            };
+
+            // Establish connection and channel
+            using var connection = await factory.CreateConnectionAsync();
+            using var channel = await connection.CreateChannelAsync();
+
+            // Declare a queue
+            string queueName = "incoming-jobs";
+            await channel.QueueDeclareAsync(queue: queueName,
+                                 durable: true,
+                                 exclusive: false,
+                                 autoDelete: false,
+                                 arguments: null);
+
+            var body = Encoding.UTF8.GetBytes(postDesc);
+
+            await channel.BasicPublishAsync(exchange: string.Empty, 
+                routingKey: queueName, body: body);
         }
     }
 }
